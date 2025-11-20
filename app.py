@@ -8,22 +8,30 @@ import time
 import gzip
 import json
 import os
-import queue  # <--- NOVO: Para gerenciar a fila
+import queue
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- CONFIGURAÇÃO ---
+# --- CONFIGURAÇÃO V13 ---
 BASE_URL = "https://fullbai.com.ar"
-ARQUIVO_CACHE = "lista_urls.json"
 TOKEN_SECRETO = "fullbai123"
-# --------------------
+
+# CAMINHO SEGURO (Volume Persistente)
+DATA_DIR = "/app/data"
+ARQUIVO_CACHE = os.path.join(DATA_DIR, "lista_urls.json")
+
+# Garante que a pasta existe
+if not os.path.exists(DATA_DIR):
+    try:
+        os.makedirs(DATA_DIR)
+    except:
+        pass # Se der erro, vai tentar salvar na raiz mesmo
+# ------------------------
 
 app = Flask(__name__)
 
 status_global = "PARADO"
 logs_memoria = []
-
-# FILA DE SNIPER (Para aguentar atualizações em massa)
 fila_sniper = queue.Queue()
 
 HEADERS_FAKE = {
@@ -39,22 +47,28 @@ def adicionar_log(msg):
     if len(logs_memoria) > 2000:
         logs_memoria.pop()
 
-# ... (Funções auxiliares iguais: regex, carregar_do_cache, salvar_no_cache) ...
 def get_urls_via_regex(text_content):
     return re.findall(r'<loc>(.*?)</loc>', text_content)
 
 def carregar_do_cache():
+    # Verifica se arquivo existe no disco persistente
     if os.path.exists(ARQUIVO_CACHE):
         try:
-            with open(ARQUIVO_CACHE, 'r') as f: return json.load(f)
-        except: return None
+            with open(ARQUIVO_CACHE, 'r') as f: 
+                dados = json.load(f)
+                adicionar_log(f"MEMÓRIA CARREGADA DO DISCO: {len(dados)} URLs.")
+                return dados
+        except Exception as e: 
+            adicionar_log(f"Erro ao ler cache: {e}")
+            return None
     return None
 
 def salvar_no_cache(lista_urls):
     try:
         with open(ARQUIVO_CACHE, 'w') as f: json.dump(lista_urls, f)
-        adicionar_log("LISTA SALVA NO DISCO.")
-    except: pass
+        adicionar_log(f"LISTA SALVA EM {ARQUIVO_CACHE} (PERSISTENTE).")
+    except Exception as e:
+        adicionar_log(f"Erro crítico ao salvar no disco: {e}")
 
 def processar_sitemap_individual(url_sitemap):
     produtos = set()
@@ -72,12 +86,12 @@ def processar_sitemap_individual(url_sitemap):
     return produtos
 
 def scanner_inteligente():
-    # Lógica de varredura igual a V11
     urls = []
     visitados = set()
+    # Paginas
     p = processar_sitemap_individual(f"{BASE_URL}/page-sitemap.xml")
     if p: urls.extend(list(p))
-    
+    # Produtos
     erros = 0
     for i in range(1, 300):
         if erros >= 3: break
@@ -89,7 +103,7 @@ def scanner_inteligente():
                 if x not in visitados:
                     visitados.add(x)
                     urls.append(x)
-    
+    # Cats
     c = processar_sitemap_individual(f"{BASE_URL}/product_cat-sitemap.xml")
     if c:
         for x in c: 
@@ -100,78 +114,61 @@ async def fetch_url(session, url):
     try:
         async with session.get(url, headers=HEADERS_FAKE, timeout=30, ssl=False) as response:
             await response.read()
-            return response.status
-    except: return 0
+    except: pass
 
-# --- NOVO: WORKER DA FILA (SNIPER CONSTANTE) ---
+# --- WORKER FILA (SNIPER) ---
 def processador_de_fila():
-    """Fica rodando eternamente esperando URLs na fila"""
-    adicionar_log("Sistema de Fila Sniper: ATIVO")
-    
-    # Cria um loop async só para esse trabalhador
+    adicionar_log("Sniper V13 Ativo")
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    
     async def visitar_batch():
         while True:
-            # Pega URL da fila (espera até aparecer se estiver vazia)
-            # Se vierem 500 de uma vez, ele processa uma por uma aqui
             try:
-                url = fila_sniper.get() # Bloqueia até ter item
-                
-                adicionar_log(f"🎯 SNIPER: Processando {url}...")
+                url = fila_sniper.get()
+                adicionar_log(f"🎯 SNIPER: {url}")
                 async with aiohttp.ClientSession() as session:
                     await fetch_url(session, url)
-                
-                # Mostra quantos ainda faltam na fila
-                pendentes = fila_sniper.qsize()
-                if pendentes > 0:
-                    adicionar_log(f"⏳ Fila: restam {pendentes} produtos...")
-                else:
-                    adicionar_log(f"✅ SNIPER: Fila limpa!")
-                    
                 fila_sniper.task_done()
-                
-                # Pequena pausa para respirar
-                await asyncio.sleep(0.1)
-                
-            except Exception as e:
-                adicionar_log(f"Erro na fila: {e}")
-
+                await asyncio.sleep(0.05)
+            except: pass
     loop.run_until_complete(visitar_batch())
 
-# Inicia o processador de fila assim que o app liga
 t_fila = threading.Thread(target=processador_de_fila, daemon=True)
 t_fila.start()
 
-# --- WORKER GERAL (BOTAO INICIAR) ---
-async def worker_logic(forcar=False):
+# --- WORKER GERAL ---
+async def worker_logic(forcar_atualizacao=False):
     global status_global
-    lista = []
-    if not forcar: lista = carregar_do_cache()
-    if not lista:
-        adicionar_log("Escaneando loja completa...")
-        loop = asyncio.get_running_loop()
-        lista = await loop.run_in_executor(None, scanner_inteligente)
-        if lista: salvar_no_cache(lista)
+    lista_urls = []
     
-    if not lista:
+    if not forcar_atualizacao:
+        lista_urls = carregar_do_cache()
+    
+    if not lista_urls:
+        adicionar_log("Arquivo não encontrado no disco. Escaneando...")
+        loop = asyncio.get_running_loop()
+        lista_urls = await loop.run_in_executor(None, scanner_inteligente)
+        if lista_urls: salvar_no_cache(lista_urls)
+    else:
+        adicionar_log(f"Usando arquivo salvo ({len(lista_urls)} URLs).")
+    
+    total = len(lista_urls)
+    if total == 0:
         status_global = "PARADO"
         return
 
-    total = len(lista)
-    semaphore = asyncio.Semaphore(50)
+    semaphore = asyncio.Semaphore(50) 
     async with aiohttp.ClientSession() as session:
         async def bound(url):
             async with semaphore: await fetch_url(session, url)
-        tasks = [bound(u) for u in lista]
-        for i, _ in enumerate(as_completed(tasks)):
-             if i % 500 == 0: adicionar_log(f"Geral: {i}/{total}...")
-        await asyncio.gather(*tasks)
+        tarefas = []
+        for i, url in enumerate(lista_urls):
+            tarefas.append(bound(url))
+            if i > 0 and i % 500 == 0:
+                adicionar_log(f"Progresso: {i}/{total}...")
+        await asyncio.gather(*tarefas)
     
     status_global = "CONCLUÍDO"
-
-from asyncio import as_completed
 
 def run_background(forcar=False):
     global status_global
@@ -208,25 +205,22 @@ def atualizar():
 def webhook():
     token = request.args.get('token')
     if token != TOKEN_SECRETO: return jsonify({"erro": "Token invalido"}), 403
-    if status_global != "RODANDO":
-        t = threading.Thread(target=run_background, args=(False,))
-        t.start()
-    return jsonify({"msg": "Rodando Completo"}), 200
+    
+    if status_global == "RODANDO":
+         # Se ja ta rodando, nao faz nada, so avisa
+        return jsonify({"msg": "Ja esta rodando"}), 200
+
+    # WEBHOOK SEMPRE TENTA USAR O CACHE (False)
+    t = threading.Thread(target=run_background, args=(False,))
+    t.start()
+    return jsonify({"msg": "Rodando (Modo Cache)"}), 200
 
 @app.route('/webhook_unitario', methods=['POST'])
 def webhook_unitario():
     dados = request.json
-    token = dados.get('token')
-    url = dados.get('url')
-    
-    if token != TOKEN_SECRETO: return jsonify({"erro": "Token invalido"}), 403
-    if not url: return jsonify({"erro": "Sem URL"}), 400
-    
-    # AGORA É SEGURO: Apenas adiciona na fila e retorna sucesso instantaneo
-    fila_sniper.put(url)
-    
-    qtd = fila_sniper.qsize()
-    return jsonify({"msg": "Adicionado na fila", "posicao": qtd}), 200
+    if dados.get('token') != TOKEN_SECRETO: return jsonify({"erro": "Token invalido"}), 403
+    if dados.get('url'): fila_sniper.put(dados.get('url'))
+    return jsonify({"msg": "Na fila"}), 200
 
 @app.route('/monitorar')
 def monitorar():
@@ -243,11 +237,10 @@ def monitorar():
         </style>
     </head>
     <body>
-        <h1>Gerador V12 (Fila Anti-Travamento)</h1>
-        <p>Status Geral: <b style="color:{cor}">{status_global}</b></p>
-        <p>Sniper: <b>ATIVO (Aguardando Webhooks)</b></p>
-        <a href="/iniciar" class="btn" style="background:green">INICIAR COMPLETO</a>
-        <a href="/atualizar" class="btn" style="background:orange">ATUALIZAR LISTA</a>
+        <h1>Gerador V13 (Persistente)</h1>
+        <p>Status: <b style="color:{cor}">{status_global}</b></p>
+        <a href="/iniciar" class="btn" style="background:green">INICIAR (CACHE)</a>
+        <a href="/atualizar" class="btn" style="background:orange">RE-ESCANEAR (ATUALIZAR)</a>
         <div class="box"><div>{log_html}</div></div>
     </body>
     </html>
