@@ -5,7 +5,8 @@ import requests
 import time
 import gzip
 import threading
-import re # Vamos usar Regex que é mais garantia
+import re
+import sys # Importante para forçar o log
 
 # --- CONFIGURAÇÃO ---
 SITEMAP_URL = "https://fullbai.com.ar/sitemap_index.xml"
@@ -16,9 +17,12 @@ app = Flask(__name__)
 is_running = False
 log_mensagens = []
 
+def log_print(msg):
+    """Função forçada para escrever no log imediatamente"""
+    print(msg, flush=True)
+    sys.stdout.flush()
+
 def get_urls_via_regex(text_content):
-    """Extrai URLs usando força bruta de texto, ignorando estrutura XML complexa"""
-    # Procura tudo que está entre <loc> e </loc>
     return re.findall(r'<loc>(.*?)</loc>', text_content)
 
 def get_all_sitemap_urls(url_inicial):
@@ -27,11 +31,11 @@ def get_all_sitemap_urls(url_inicial):
     visitados = set()
 
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (compatible; CacheBot/2.0)',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
     }
 
-    print(f"--- INICIANDO VARREDURA EM: {url_inicial} ---")
+    log_print(f"--- [V3] INICIANDO VARREDURA EM: {url_inicial} ---")
 
     while sitemaps_para_visitar:
         atual = sitemaps_para_visitar.pop(0)
@@ -40,41 +44,35 @@ def get_all_sitemap_urls(url_inicial):
         visitados.add(atual)
 
         try:
-            print(f"Baixando Sitemap: {atual} ...")
+            log_print(f"Baixando Sitemap: {atual} ...")
             r = requests.get(atual, headers=headers, timeout=20)
             
             if r.status_code != 200:
-                print(f"ERRO {r.status_code} ao baixar {atual}")
+                log_print(f"ERRO {r.status_code} ao baixar {atual}")
                 continue
 
-            # Tenta descompactar se for .gz ou se o header disser que é
             content = r.content
             if atual.endswith('.gz') or r.headers.get('Content-Type') == 'application/x-gzip':
                 try:
                     content = gzip.decompress(content)
                 except:
-                    pass # Talvez não fosse gzip
+                    pass
             
-            # Converte para texto
             texto = content.decode('utf-8', errors='ignore')
-            
-            # Pega todos os links dentro de <loc>
             links_encontrados = get_urls_via_regex(texto)
             
             for link in links_encontrados:
                 link = link.strip()
-                # Se o link termina em .xml ou .xml.gz, é outro sitemap
                 if 'sitemap' in link and (link.endswith('.xml') or link.endswith('.gz')):
                     if link not in visitados:
                         sitemaps_para_visitar.append(link)
                 else:
-                    # Se não é sitemap, é produto/página
                     urls_finais.add(link)
                     
         except Exception as e:
-            print(f"Erro critico ao processar {atual}: {e}")
+            log_print(f"Erro critico ao processar {atual}: {e}")
 
-    print(f"--- VARREDURA CONCLUIDA: {len(urls_finais)} URLs encontradas ---")
+    log_print(f"--- VARREDURA CONCLUIDA: {len(urls_finais)} URLs encontradas ---")
     return list(urls_finais)
 
 async def fetch_url(session, url):
@@ -83,7 +81,14 @@ async def fetch_url(session, url):
         async with session.get(url, headers=headers, timeout=15) as response:
             await response.read()
             cf = response.headers.get('cf-cache-status', 'MISS')
-            print(f"Visitado: {url} [{response.status}] CF: {cf}")
+            # Printa apenas a cada 50 requisições para não poluir demais, ou se der erro
+            if response.status != 200:
+                log_print(f"FALHA: {url} [{response.status}]")
+            elif 'HIT' in cf:
+                pass # Não printa HIT para economizar log visual
+            else:
+                # Printa só os MISS (que estamos esquentando)
+                log_print(f"ESQUENTADO: {url} [CF: {cf}]")
             return True
     except:
         return False
@@ -92,17 +97,18 @@ async def worker():
     global is_running
     is_running = True
     log_mensagens.clear()
-    log_mensagens.append("Lendo Sitemaps (Isso pode demorar 1 ou 2 minutos)... olhe o log preto!")
+    log_mensagens.append("Iniciando V3... Olhe o log preto!")
     
-    # Roda a função de pegar URLs (que agora tem prints)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
     urls = await loop.run_in_executor(None, get_all_sitemap_urls, SITEMAP_URL)
     
     total = len(urls)
-    log_mensagens.append(f"Total encontradas: {total}. Iniciando visitas...")
+    log_print(f"Total de URLs para visitar: {total}")
 
     if total > 0:
-        semaphore = asyncio.Semaphore(15) # Aumentei um pouco a velocidade
+        semaphore = asyncio.Semaphore(20) 
         async with aiohttp.ClientSession() as session:
             async def bound_fetch(url):
                 async with semaphore:
@@ -110,7 +116,7 @@ async def worker():
             tasks = [bound_fetch(url) for url in urls]
             await asyncio.gather(*tasks)
     
-    log_mensagens.append("FINALIZADO!")
+    log_print("--- CICLO FINALIZADO ---")
     is_running = False
 
 def run_async_background():
@@ -118,12 +124,9 @@ def run_async_background():
 
 @app.route('/')
 def index():
-    status = "RODANDO" if is_running else "PARADO"
     return f"""
-    <h1>Gerador V2 (Modo Regex)</h1>
-    <p>Status: <b>{status}</b></p>
+    <h1>Gerador V3 (Tagarela)</h1>
     <a href="/iniciar"><button>INICIAR AGORA</button></a>
-    <p>Ultima msg: {log_mensagens[-1] if log_mensagens else '...'}</p>
     """
 
 @app.route('/iniciar')
@@ -132,7 +135,7 @@ def iniciar():
     if not is_running:
         t = threading.Thread(target=run_async_background)
         t.start()
-    return "Iniciado! Verifique o LOG PRETO no EasyPanel para ver os links aparecendo."
+    return "Iniciado! Agora é impossível o log não aparecer."
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=80)
