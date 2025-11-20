@@ -14,7 +14,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # --- CONFIGURAÇÃO ---
 BASE_URL = "https://fullbai.com.ar"
 ARQUIVO_CACHE = "lista_urls.json"
-TOKEN_SECRETO = "fullbai123"  # <--- SUA SENHA DO WEBHOOK
+TOKEN_SECRETO = "fullbai123"
 # --------------------
 
 app = Flask(__name__)
@@ -43,7 +43,6 @@ def carregar_do_cache():
         try:
             with open(ARQUIVO_CACHE, 'r') as f:
                 dados = json.load(f)
-                adicionar_log(f"Memória encontrada! Carregando {len(dados)} URLs.")
                 return dados
         except:
             return None
@@ -53,6 +52,7 @@ def salvar_no_cache(lista_urls):
     try:
         with open(ARQUIVO_CACHE, 'w') as f:
             json.dump(lista_urls, f)
+        adicionar_log("LISTA SALVA NO DISCO COM SUCESSO.")
     except Exception as e:
         adicionar_log(f"Erro ao salvar cache: {e}")
 
@@ -61,7 +61,8 @@ def processar_sitemap_individual(url_sitemap):
     try:
         adicionar_log(f"Lendo: {url_sitemap} ...")
         time.sleep(0.5) 
-        r = requests.get(url_sitemap, headers=HEADERS_FAKE, timeout=30, verify=False)
+        # AUMENTEI O TIMEOUT PARA 90 SEGUNDOS (Para nao dar erro no seu server)
+        r = requests.get(url_sitemap, headers=HEADERS_FAKE, timeout=90, verify=False)
         if r.status_code != 200:
             adicionar_log(f"Erro/Vazio: {url_sitemap}")
             return None
@@ -84,24 +85,32 @@ def scanner_inteligente():
     urls_finais = []
     visitados = set()
     
+    adicionar_log("--- CRIANDO NOVA LISTA (Isso acontece pq a lista nao existia) ---")
+
     # Fase 1: Páginas
     prods = processar_sitemap_individual(f"{BASE_URL}/page-sitemap.xml")
     if prods: urls_finais.extend(list(prods))
 
-    # Fase 2: Produtos (Inteligente)
+    # Fase 2: Produtos
     erros_seguidos = 0
     for i in range(1, 300):
-        if erros_seguidos >= 3: break
+        if erros_seguidos >= 3: 
+            adicionar_log(f"Parando leitura no sitemap {i} (fim dos produtos).")
+            break
         url = f"{BASE_URL}/product-sitemap{i}.xml"
         resultado = processar_sitemap_individual(url)
         if resultado is None or len(resultado) == 0:
             erros_seguidos += 1
         else:
             erros_seguidos = 0
+            novos = 0
             for p in resultado:
                 if p not in visitados:
                     visitados.add(p)
                     urls_finais.append(p)
+                    novos += 1
+            if novos > 0:
+                adicionar_log(f"-> Adicionados +{novos} URLs do mapa {i}")
     
     # Fase 3: Categorias
     cats = processar_sitemap_individual(f"{BASE_URL}/product_cat-sitemap.xml")
@@ -113,23 +122,27 @@ def scanner_inteligente():
 
 async def fetch_url(session, url):
     try:
-        async with session.get(url, headers=HEADERS_FAKE, timeout=40, ssl=False) as response:
+        # Timeout curto para visitas (30s)
+        async with session.get(url, headers=HEADERS_FAKE, timeout=30, ssl=False) as response:
             await response.read()
     except: pass
 
 async def worker_logic(forcar_atualizacao=False):
     global status_global
     lista_urls = []
+    
+    # Tenta carregar cache primeiro
     if not forcar_atualizacao:
         lista_urls = carregar_do_cache()
     
+    # Se nao tiver cache, somos OBRIGADOS a escanear
     if not lista_urls:
-        adicionar_log("Webhook acionado: Escaneando loja completa...")
+        adicionar_log("AVISO: Lista não encontrada. Precisamos escanear 1 vez para criar o arquivo.")
         loop = asyncio.get_running_loop()
         lista_urls = await loop.run_in_executor(None, scanner_inteligente)
         if lista_urls: salvar_no_cache(lista_urls)
     else:
-        adicionar_log("Webhook acionado: Usando memória rápida (Zero Load).")
+        adicionar_log(f"Usando lista salva ({len(lista_urls)} URLs). Modo Rápido.")
     
     total = len(lista_urls)
     if total == 0:
@@ -144,10 +157,10 @@ async def worker_logic(forcar_atualizacao=False):
         for i, url in enumerate(lista_urls):
             tarefas.append(bound_fetch(url))
             if i > 0 and i % 500 == 0:
-                adicionar_log(f"Progresso: {i}/{total}...")
+                adicionar_log(f"Progresso: {i}/{total} visitas...")
         await asyncio.gather(*tarefas)
     
-    adicionar_log("--- CICLO WEBHOOK FINALIZADO ---")
+    adicionar_log("--- CONCLUÍDO ---")
     status_global = "CONCLUÍDO"
 
 def run_background_thread(forcar=False):
@@ -180,27 +193,20 @@ def atualizar():
         t.start()
     return redirect(url_for('monitorar'))
 
-# --- O WEBHOOK ---
 @app.route('/webhook', methods=['GET', 'POST'])
 def webhook():
     global status_global
-    
-    # Verifica a senha
     token = request.args.get('token')
-    if token != TOKEN_SECRETO:
-        return jsonify({"status": "erro", "msg": "Senha incorreta"}), 403
-    
-    modo = request.args.get('modo', 'rapido') # padrao é rapido
+    if token != TOKEN_SECRETO: return jsonify({"status": "erro", "msg": "Senha incorreta"}), 403
     
     if status_global == "RODANDO":
         return jsonify({"status": "ocupado", "msg": "Ja esta rodando"}), 200
     
-    # Inicia o robo
-    forcar = True if modo == 'completo' else False
-    t = threading.Thread(target=run_background_thread, args=(forcar,))
+    # WEBHOOK SEMPRE TENTA O MODO RÁPIDO (False)
+    t = threading.Thread(target=run_background_thread, args=(False,))
     t.start()
     
-    return jsonify({"status": "sucesso", "msg": f"Robo iniciado em modo {modo}"}), 200
+    return jsonify({"status": "sucesso", "msg": "Robo iniciado via Webhook"}), 200
 
 @app.route('/monitorar')
 def monitorar():
@@ -219,11 +225,10 @@ def monitorar():
     </head>
     <body>
         <div class="container">
-            <h1>Gerador V9 (Com Webhook)</h1>
-            <p>Seu Link de Webhook: <b>/webhook?token={TOKEN_SECRETO}</b></p>
+            <h1>Gerador V10 (Timeout Ajustado)</h1>
             <p>Status: <b style="color:{cor}">{status_global}</b></p>
             <a href="/iniciar" class="btn" style="background:green">INICIAR</a>
-            <a href="/atualizar" class="btn" style="background:orange">ATUALIZAR</a>
+            <a href="/atualizar" class="btn" style="background:orange">ATUALIZAR LISTA (Manual)</a>
             <div class="box"><div>{log_html}</div></div>
         </div>
     </body>
