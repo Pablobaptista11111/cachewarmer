@@ -12,20 +12,20 @@ import queue
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- CONFIGURAÇÃO V13 ---
+# --- CONFIGURAÇÃO V13 (COM SUPORTE AO VOLUME) ---
 BASE_URL = "https://fullbai.com.ar"
 TOKEN_SECRETO = "fullbai123"
 
-# CAMINHO SEGURO (Volume Persistente)
+# AQUI ESTÁ A MÁGICA: Salva dentro do volume que você criou
 DATA_DIR = "/app/data"
 ARQUIVO_CACHE = os.path.join(DATA_DIR, "lista_urls.json")
 
-# Garante que a pasta existe
+# Garante que a pasta existe (caso o volume não tenha montado certo)
 if not os.path.exists(DATA_DIR):
     try:
         os.makedirs(DATA_DIR)
     except:
-        pass # Se der erro, vai tentar salvar na raiz mesmo
+        pass 
 # ------------------------
 
 app = Flask(__name__)
@@ -207,10 +207,8 @@ def webhook():
     if token != TOKEN_SECRETO: return jsonify({"erro": "Token invalido"}), 403
     
     if status_global == "RODANDO":
-         # Se ja ta rodando, nao faz nada, so avisa
         return jsonify({"msg": "Ja esta rodando"}), 200
 
-    # WEBHOOK SEMPRE TENTA USAR O CACHE (False)
     t = threading.Thread(target=run_background, args=(False,))
     t.start()
     return jsonify({"msg": "Rodando (Modo Cache)"}), 200
