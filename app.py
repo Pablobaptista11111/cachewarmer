@@ -12,21 +12,17 @@ import queue
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- CONFIGURAÇÃO V13 (COM SUPORTE AO VOLUME) ---
+# --- CONFIGURAÇÃO ---
 BASE_URL = "https://fullbai.com.ar"
 TOKEN_SECRETO = "fullbai123"
-
-# AQUI ESTÁ A MÁGICA: Salva dentro do volume que você criou
 DATA_DIR = "/app/data"
 ARQUIVO_CACHE = os.path.join(DATA_DIR, "lista_urls.json")
 
-# Garante que a pasta existe (caso o volume não tenha montado certo)
+# Tenta criar a pasta se não existir
 if not os.path.exists(DATA_DIR):
-    try:
-        os.makedirs(DATA_DIR)
-    except:
-        pass 
-# ------------------------
+    try: os.makedirs(DATA_DIR)
+    except: pass
+# --------------------
 
 app = Flask(__name__)
 
@@ -44,19 +40,54 @@ def adicionar_log(msg):
     linha = f"[{timestamp}] {msg}"
     print(linha, flush=True)
     logs_memoria.insert(0, linha)
-    if len(logs_memoria) > 2000:
-        logs_memoria.pop()
+    if len(logs_memoria) > 2000: logs_memoria.pop()
 
+# --- FERRAMENTA DE DIAGNÓSTICO (NOVO) ---
+def testar_disco_agora():
+    adicionar_log("--- INICIANDO TESTE DE DISCO ---")
+    adicionar_log(f"Tentando escrever em: {DATA_DIR}")
+    
+    caminho_teste = os.path.join(DATA_DIR, "teste_permissao.txt")
+    
+    # Teste 1: Escrita
+    try:
+        with open(caminho_teste, "w") as f:
+            f.write("Teste de escrita OK")
+        adicionar_log("✅ SUCESSO: Arquivo criado.")
+    except Exception as e:
+        adicionar_log(f"❌ ERRO CRÍTICO DE ESCRITA: {e}")
+        return
+
+    # Teste 2: Leitura
+    try:
+        with open(caminho_teste, "r") as f:
+            conteudo = f.read()
+        if conteudo == "Teste de escrita OK":
+            adicionar_log("✅ SUCESSO: Arquivo lido corretamente.")
+        else:
+            adicionar_log("❌ ERRO: Conteúdo lido incorreto.")
+    except Exception as e:
+        adicionar_log(f"❌ ERRO DE LEITURA: {e}")
+
+    # Teste 3: Listar arquivos
+    try:
+        arquivos = os.listdir(DATA_DIR)
+        adicionar_log(f"📂 Arquivos na pasta agora: {arquivos}")
+    except:
+        pass
+        
+    adicionar_log("--- FIM DO TESTE ---")
+
+# ... (Resto das funções auxiliares iguais: regex, cache, scanner) ...
 def get_urls_via_regex(text_content):
     return re.findall(r'<loc>(.*?)</loc>', text_content)
 
 def carregar_do_cache():
-    # Verifica se arquivo existe no disco persistente
     if os.path.exists(ARQUIVO_CACHE):
         try:
             with open(ARQUIVO_CACHE, 'r') as f: 
                 dados = json.load(f)
-                adicionar_log(f"MEMÓRIA CARREGADA DO DISCO: {len(dados)} URLs.")
+                adicionar_log(f"MEMÓRIA CARREGADA: {len(dados)} URLs.")
                 return dados
         except Exception as e: 
             adicionar_log(f"Erro ao ler cache: {e}")
@@ -66,9 +97,9 @@ def carregar_do_cache():
 def salvar_no_cache(lista_urls):
     try:
         with open(ARQUIVO_CACHE, 'w') as f: json.dump(lista_urls, f)
-        adicionar_log(f"LISTA SALVA EM {ARQUIVO_CACHE} (PERSISTENTE).")
+        adicionar_log(f"LISTA SALVA EM {ARQUIVO_CACHE}.")
     except Exception as e:
-        adicionar_log(f"Erro crítico ao salvar no disco: {e}")
+        adicionar_log(f"ERRO AO SALVAR NO DISCO: {e}")
 
 def processar_sitemap_individual(url_sitemap):
     produtos = set()
@@ -88,10 +119,8 @@ def processar_sitemap_individual(url_sitemap):
 def scanner_inteligente():
     urls = []
     visitados = set()
-    # Paginas
     p = processar_sitemap_individual(f"{BASE_URL}/page-sitemap.xml")
     if p: urls.extend(list(p))
-    # Produtos
     erros = 0
     for i in range(1, 300):
         if erros >= 3: break
@@ -103,7 +132,6 @@ def scanner_inteligente():
                 if x not in visitados:
                     visitados.add(x)
                     urls.append(x)
-    # Cats
     c = processar_sitemap_individual(f"{BASE_URL}/product_cat-sitemap.xml")
     if c:
         for x in c: 
@@ -116,9 +144,7 @@ async def fetch_url(session, url):
             await response.read()
     except: pass
 
-# --- WORKER FILA (SNIPER) ---
 def processador_de_fila():
-    adicionar_log("Sniper V13 Ativo")
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     async def visitar_batch():
@@ -136,38 +162,33 @@ def processador_de_fila():
 t_fila = threading.Thread(target=processador_de_fila, daemon=True)
 t_fila.start()
 
-# --- WORKER GERAL ---
 async def worker_logic(forcar_atualizacao=False):
     global status_global
     lista_urls = []
-    
-    if not forcar_atualizacao:
-        lista_urls = carregar_do_cache()
-    
+    if not forcar_atualizacao: lista_urls = carregar_do_cache()
     if not lista_urls:
-        adicionar_log("Arquivo não encontrado no disco. Escaneando...")
+        adicionar_log("Arquivo nao existe. Iniciando Scanner...")
         loop = asyncio.get_running_loop()
         lista_urls = await loop.run_in_executor(None, scanner_inteligente)
         if lista_urls: salvar_no_cache(lista_urls)
-    else:
-        adicionar_log(f"Usando arquivo salvo ({len(lista_urls)} URLs).")
     
-    total = len(lista_urls)
-    if total == 0:
+    if not lista_urls:
         status_global = "PARADO"
         return
+    
+    # Salva de novo só pra garantir que a permissão tá ok
+    salvar_no_cache(lista_urls) 
 
     semaphore = asyncio.Semaphore(50) 
     async with aiohttp.ClientSession() as session:
         async def bound(url):
             async with semaphore: await fetch_url(session, url)
         tarefas = []
+        total = len(lista_urls)
         for i, url in enumerate(lista_urls):
             tarefas.append(bound(url))
-            if i > 0 and i % 500 == 0:
-                adicionar_log(f"Progresso: {i}/{total}...")
+            if i > 0 and i % 500 == 0: adicionar_log(f"Progresso: {i}/{total}...")
         await asyncio.gather(*tarefas)
-    
     status_global = "CONCLUÍDO"
 
 def run_background(forcar=False):
@@ -181,7 +202,6 @@ def run_background(forcar=False):
         loop.close()
         if status_global == "RODANDO": status_global = "PARADO"
 
-# --- ROTAS ---
 @app.route('/')
 def index(): return redirect(url_for('monitorar'))
 
@@ -201,17 +221,19 @@ def atualizar():
         t.start()
     return redirect(url_for('monitorar'))
 
+# --- ROTA DE TESTE ---
+@app.route('/testar_disco')
+def testar_disco():
+    testar_disco_agora()
+    return redirect(url_for('monitorar'))
+
 @app.route('/webhook', methods=['GET', 'POST'])
 def webhook():
-    token = request.args.get('token')
-    if token != TOKEN_SECRETO: return jsonify({"erro": "Token invalido"}), 403
-    
-    if status_global == "RODANDO":
-        return jsonify({"msg": "Ja esta rodando"}), 200
-
-    t = threading.Thread(target=run_background, args=(False,))
-    t.start()
-    return jsonify({"msg": "Rodando (Modo Cache)"}), 200
+    if request.args.get('token') != TOKEN_SECRETO: return jsonify({"erro": "Token invalido"}), 403
+    if status_global != "RODANDO":
+        t = threading.Thread(target=run_background, args=(False,))
+        t.start()
+    return jsonify({"msg": "Rodando"}), 200
 
 @app.route('/webhook_unitario', methods=['POST'])
 def webhook_unitario():
@@ -231,14 +253,17 @@ def monitorar():
         <style>
             body {{ font-family: monospace; padding: 20px; background: #222; color: #fff; }}
             .box {{ background: #333; padding: 20px; border: 1px solid #444; border-radius: 8px; height: 600px; overflow-y: scroll; display: flex; flex-direction: column-reverse; }}
-            .btn {{ padding: 15px 30px; text-decoration: none; font-size: 18px; display: inline-block; margin-bottom: 20px; border-radius: 5px; margin-right: 10px; color:white; }}
+            .btn {{ padding: 15px 30px; text-decoration: none; font-size: 18px; display: inline-block; margin-bottom: 20px; border-radius: 5px; margin-right: 10px; color:white; font-weight: bold; }}
         </style>
     </head>
     <body>
-        <h1>Gerador V13 (Persistente)</h1>
+        <h1>Gerador V14 (Teste de Disco)</h1>
         <p>Status: <b style="color:{cor}">{status_global}</b></p>
-        <a href="/iniciar" class="btn" style="background:green">INICIAR (CACHE)</a>
-        <a href="/atualizar" class="btn" style="background:orange">RE-ESCANEAR (ATUALIZAR)</a>
+        
+        <a href="/testar_disco" class="btn" style="background:#007bff">1. TESTAR DISCO</a>
+        <a href="/atualizar" class="btn" style="background:orange">2. CRIAR LISTA</a>
+        <a href="/iniciar" class="btn" style="background:green">3. INICIAR</a>
+        
         <div class="box"><div>{log_html}</div></div>
     </body>
     </html>
