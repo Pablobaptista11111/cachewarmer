@@ -1,4 +1,4 @@
-from flask import Flask, redirect, url_for
+from flask import Flask, redirect, url_for, request, jsonify
 import asyncio
 import aiohttp
 import requests
@@ -6,12 +6,15 @@ import threading
 import re
 import time
 import gzip
+import json
+import os
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- CONFIGURAÇÃO ---
-SITEMAP_INDEX = "https://fullbai.com.ar/sitemap_index.xml"
 BASE_URL = "https://fullbai.com.ar"
+ARQUIVO_CACHE = "lista_urls.json"
+TOKEN_SECRETO = "fullbai123"  # <--- SUA SENHA DO WEBHOOK
 # --------------------
 
 app = Flask(__name__)
@@ -29,90 +32,82 @@ def adicionar_log(msg):
     linha = f"[{timestamp}] {msg}"
     print(linha, flush=True)
     logs_memoria.insert(0, linha)
-    if len(logs_memoria) > 300:
+    if len(logs_memoria) > 2000:
         logs_memoria.pop()
 
 def get_urls_via_regex(text_content):
     return re.findall(r'<loc>(.*?)</loc>', text_content)
 
-def gerar_lista_manual():
-    """Gera a lista na ordem EXATA que você pediu"""
-    lista = []
-    adicionar_log(">>> GERANDO LISTA MANUAL (ORDEM PRIORITÁRIA) <<<")
-    
-    # 1. PRIORIDADE MÁXIMA: Páginas (Home, etc)
-    lista.append(f"{BASE_URL}/page-sitemap.xml")
-    
-    # 2. PRIORIDADE: Produtos (do 1 ao 210)
-    for i in range(1, 211):
-        lista.append(f"{BASE_URL}/product-sitemap{i}.xml")
-    
-    # 3. PRIORIDADE FINAL: Categorias
-    # Nota: Adicionei as duas variações comuns do Yoast para garantir
-    lista.append(f"{BASE_URL}/category-sitemap.xml")      # Categorias de Blog
-    lista.append(f"{BASE_URL}/product_cat-sitemap.xml")   # Categorias de Produto (Importante para loja)
-    
-    adicionar_log(f"Lista gerada com {len(lista)} sitemaps na ordem correta.")
-    return lista
+def carregar_do_cache():
+    if os.path.exists(ARQUIVO_CACHE):
+        try:
+            with open(ARQUIVO_CACHE, 'r') as f:
+                dados = json.load(f)
+                adicionar_log(f"Memória encontrada! Carregando {len(dados)} URLs.")
+                return dados
+        except:
+            return None
+    return None
+
+def salvar_no_cache(lista_urls):
+    try:
+        with open(ARQUIVO_CACHE, 'w') as f:
+            json.dump(lista_urls, f)
+    except Exception as e:
+        adicionar_log(f"Erro ao salvar cache: {e}")
 
 def processar_sitemap_individual(url_sitemap):
     produtos_encontrados = set()
-    novos_sitemaps = [] # Não vamos usar recursão no modo manual para respeitar a ordem
-    
     try:
         adicionar_log(f"Lendo: {url_sitemap} ...")
-        r = requests.get(url_sitemap, headers=HEADERS_FAKE, timeout=60, verify=False)
-        
+        time.sleep(0.5) 
+        r = requests.get(url_sitemap, headers=HEADERS_FAKE, timeout=30, verify=False)
         if r.status_code != 200:
-            adicionar_log(f"Ignorado: {url_sitemap} (Status {r.status_code})")
-            return set()
-
+            adicionar_log(f"Erro/Vazio: {url_sitemap}")
+            return None
         content = r.content
         if url_sitemap.endswith('.gz'):
-            try:
-                content = gzip.decompress(content)
-            except:
-                pass
-        
+            try: content = gzip.decompress(content)
+            except: pass
         texto = content.decode('utf-8', errors='ignore')
         links = get_urls_via_regex(texto)
-        
         for link in links:
             link = link.strip()
-            # Se achou link de produto/pagina, adiciona
             if not ('sitemap' in link and link.endswith('.xml')):
                 produtos_encontrados.add(link)
-                
     except Exception as e:
         adicionar_log(f"Erro ao ler {url_sitemap}: {str(e)}")
-    
+        return None
     return produtos_encontrados
 
-def get_all_sitemap_urls_sync():
-    urls_finais = [] # Mudamos para lista para MANTER A ORDEM DE VISITA
+def scanner_inteligente():
+    urls_finais = []
     visitados = set()
-
-    # Pula direto para o modo manual para respeitar sua ordem
-    # (Ignora o sitemap_index.xml que bagunça a ordem e dá timeout)
-    sitemaps_para_visitar = gerar_lista_manual()
-
-    adicionar_log(f"Iniciando leitura sequencial de {len(sitemaps_para_visitar)} sitemaps...")
     
-    count = 0
-    for sitemap in sitemaps_para_visitar:
-        prods = processar_sitemap_individual(sitemap)
-        
-        # Adiciona os produtos encontrados mantendo a ordem de chegada
-        novos = 0
-        for p in prods:
-            if p not in visitados:
-                visitados.add(p)
-                urls_finais.append(p)
-                novos += 1
-        
-        count += 1
-        if novos > 0:
-            adicionar_log(f"-> +{novos} URLs extraídas deste sitemap.")
+    # Fase 1: Páginas
+    prods = processar_sitemap_individual(f"{BASE_URL}/page-sitemap.xml")
+    if prods: urls_finais.extend(list(prods))
+
+    # Fase 2: Produtos (Inteligente)
+    erros_seguidos = 0
+    for i in range(1, 300):
+        if erros_seguidos >= 3: break
+        url = f"{BASE_URL}/product-sitemap{i}.xml"
+        resultado = processar_sitemap_individual(url)
+        if resultado is None or len(resultado) == 0:
+            erros_seguidos += 1
+        else:
+            erros_seguidos = 0
+            for p in resultado:
+                if p not in visitados:
+                    visitados.add(p)
+                    urls_finais.append(p)
+    
+    # Fase 3: Categorias
+    cats = processar_sitemap_individual(f"{BASE_URL}/product_cat-sitemap.xml")
+    if cats:
+        for c in cats:
+            if c not in visitados: urls_finais.append(c)
 
     return urls_finais
 
@@ -120,52 +115,48 @@ async def fetch_url(session, url):
     try:
         async with session.get(url, headers=HEADERS_FAKE, timeout=40, ssl=False) as response:
             await response.read()
-            # Sem logs para cada URL para não travar o navegador
-    except:
-        pass
+    except: pass
 
-async def worker_logic():
+async def worker_logic(forcar_atualizacao=False):
     global status_global
-    adicionar_log("Iniciando V7 (Ordem Prioritária)...")
+    lista_urls = []
+    if not forcar_atualizacao:
+        lista_urls = carregar_do_cache()
     
-    loop = asyncio.get_running_loop()
-    urls = await loop.run_in_executor(None, get_all_sitemap_urls_sync)
+    if not lista_urls:
+        adicionar_log("Webhook acionado: Escaneando loja completa...")
+        loop = asyncio.get_running_loop()
+        lista_urls = await loop.run_in_executor(None, scanner_inteligente)
+        if lista_urls: salvar_no_cache(lista_urls)
+    else:
+        adicionar_log("Webhook acionado: Usando memória rápida (Zero Load).")
     
-    total = len(urls)
-    adicionar_log(f"--- TOTAL FINAL: {total} URLs na fila ---")
-    
+    total = len(lista_urls)
     if total == 0:
-        adicionar_log("PARANDO: Nada encontrado.")
         status_global = "PARADO"
         return
 
-    # Aumentei para 50 threads (visitantes simultâneos)
     semaphore = asyncio.Semaphore(50) 
     async with aiohttp.ClientSession() as session:
         async def bound_fetch(url):
-            async with semaphore:
-                await fetch_url(session, url)
-        
+            async with semaphore: await fetch_url(session, url)
         tarefas = []
-        adicionar_log("Disparando visitas na ordem da lista...")
-        for i, url in enumerate(urls):
+        for i, url in enumerate(lista_urls):
             tarefas.append(bound_fetch(url))
-            if i > 0 and i % 200 == 0:
-                adicionar_log(f"Progresso: {i}/{total} visitas enviadas...")
-        
+            if i > 0 and i % 500 == 0:
+                adicionar_log(f"Progresso: {i}/{total}...")
         await asyncio.gather(*tarefas)
     
-    adicionar_log("--- TUDO FINALIZADO ---")
+    adicionar_log("--- CICLO WEBHOOK FINALIZADO ---")
     status_global = "CONCLUÍDO"
 
-def run_background_thread():
+def run_background_thread(forcar=False):
     global status_global
     status_global = "RODANDO"
     logs_memoria.clear()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(worker_logic())
+    try: loop.run_until_complete(worker_logic(forcar))
     finally:
         loop.close()
         if status_global == "RODANDO": status_global = "PARADO"
@@ -177,9 +168,39 @@ def index(): return redirect(url_for('monitorar'))
 def iniciar():
     global status_global
     if status_global != "RODANDO":
-        t = threading.Thread(target=run_background_thread)
+        t = threading.Thread(target=run_background_thread, args=(False,))
         t.start()
     return redirect(url_for('monitorar'))
+
+@app.route('/atualizar')
+def atualizar():
+    global status_global
+    if status_global != "RODANDO":
+        t = threading.Thread(target=run_background_thread, args=(True,))
+        t.start()
+    return redirect(url_for('monitorar'))
+
+# --- O WEBHOOK ---
+@app.route('/webhook', methods=['GET', 'POST'])
+def webhook():
+    global status_global
+    
+    # Verifica a senha
+    token = request.args.get('token')
+    if token != TOKEN_SECRETO:
+        return jsonify({"status": "erro", "msg": "Senha incorreta"}), 403
+    
+    modo = request.args.get('modo', 'rapido') # padrao é rapido
+    
+    if status_global == "RODANDO":
+        return jsonify({"status": "ocupado", "msg": "Ja esta rodando"}), 200
+    
+    # Inicia o robo
+    forcar = True if modo == 'completo' else False
+    t = threading.Thread(target=run_background_thread, args=(forcar,))
+    t.start()
+    
+    return jsonify({"status": "sucesso", "msg": f"Robo iniciado em modo {modo}"}), 200
 
 @app.route('/monitorar')
 def monitorar():
@@ -191,15 +212,20 @@ def monitorar():
         <meta http-equiv="refresh" content="2">
         <style>
             body {{ font-family: monospace; padding: 20px; background: #222; color: #fff; }}
-            .box {{ background: #333; padding: 20px; border: 1px solid #444; border-radius: 8px; }}
-            .btn {{ background: #007bff; color: white; padding: 15px 30px; text-decoration: none; font-size: 18px; display: inline-block; margin-bottom: 20px; border-radius: 5px; }}
+            .container {{ max_width: 1000px; margin: 0 auto; }}
+            .box {{ background: #333; padding: 20px; border: 1px solid #444; border-radius: 8px; height: 600px; overflow-y: scroll; display: flex; flex-direction: column-reverse; }}
+            .btn {{ padding: 15px 30px; text-decoration: none; font-size: 18px; display: inline-block; margin-bottom: 20px; border-radius: 5px; margin-right: 10px; color:white; }}
         </style>
     </head>
     <body>
-        <h1>Gerador V7 (Páginas > Produtos > Categorias)</h1>
-        <p>Status: <b style="color:{cor}">{status_global}</b></p>
-        <a href="/iniciar" class="btn">INICIAR ROBO</a>
-        <div class="box"><h3>Logs:</h3>{log_html}</div>
+        <div class="container">
+            <h1>Gerador V9 (Com Webhook)</h1>
+            <p>Seu Link de Webhook: <b>/webhook?token={TOKEN_SECRETO}</b></p>
+            <p>Status: <b style="color:{cor}">{status_global}</b></p>
+            <a href="/iniciar" class="btn" style="background:green">INICIAR</a>
+            <a href="/atualizar" class="btn" style="background:orange">ATUALIZAR</a>
+            <div class="box"><div>{log_html}</div></div>
+        </div>
     </body>
     </html>
     """
