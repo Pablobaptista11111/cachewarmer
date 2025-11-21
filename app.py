@@ -14,7 +14,7 @@ import datetime
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- CONFIGURAÇÃO V24 (COM VELOCÍMETRO) ---
+# --- CONFIGURAÇÃO V25 (COM FREIO DE EMERGÊNCIA) ---
 BASE_URL = "https://fullbai.com.ar"
 TOKEN_SECRETO = "fullbai123"
 DATA_DIR = "/app/data"
@@ -26,6 +26,9 @@ HORA_AGENDADA = "04:00"
 app = Flask(__name__)
 
 status_global = "PARADO"
+# VARIAVEL DE CONTROLE DO FREIO
+abortar_missao = False 
+
 fila_sniper = queue.Queue()
 
 HEADERS_FAKE = {
@@ -82,6 +85,9 @@ def salvar_no_cache(lista_urls):
         adicionar_log(f"❌ ERRO SALVAR: {e}")
 
 def processar_sitemap_individual(url_sitemap, filtro=None):
+    # VERIFICACAO DE FREIO NO SCANNER
+    if abortar_missao: return []
+    
     produtos = set()
     try:
         adicionar_log(f"Lendo: {url_sitemap}...")
@@ -111,6 +117,7 @@ def scanner_inteligente():
                 visitados.add(u)
                 urls.append(u)
 
+    if abortar_missao: return []
     adicionar_log("🔍 INICIANDO SCANNER...")
     add(processar_sitemap_individual(f"{BASE_URL}/product_cat-sitemap.xml", filtro="principales"))
     add(processar_sitemap_individual(f"{BASE_URL}/page-sitemap.xml"))
@@ -118,10 +125,12 @@ def scanner_inteligente():
     erros = 0
     adicionar_log("🔍 Varrendo produtos...")
     for i in range(1, 300):
-        if erros >= 3: 
-            adicionar_log(f"Parece que acabou no sitemap {i}.")
+        # VERIFICACAO DE FREIO NO LOOP
+        if abortar_missao: 
+            adicionar_log("🛑 SCANNER ABORTADO PELO USUÁRIO.")
             break
-        
+            
+        if erros >= 3: break
         if i % 20 == 0: adicionar_log(f"Checando sitemap {i}...")
         res = processar_sitemap_individual(f"{BASE_URL}/product-sitemap{i}.xml")
         if not res: erros += 1
@@ -156,19 +165,32 @@ t_fila = threading.Thread(target=processador_de_fila, daemon=True)
 t_fila.start()
 
 async def worker_logic(forcar_atualizacao=False, origem="Desconhecido"):
-    global status_global
-    lista_urls = []
+    global status_global, abortar_missao
     
     adicionar_log(f"🔔 GATILHO: {origem}")
     
+    # Se forcar ou sem cache, scaneia
+    lista_urls = []
     if not forcar_atualizacao: 
         lista_urls = carregar_do_cache()
-        if lista_urls: adicionar_log(f"📂 Cache carregado: {len(lista_urls)} URLs.")
+        if lista_urls: adicionar_log(f"📂 Cache: {len(lista_urls)} URLs.")
     
-    if not lista_urls:
-        adicionar_log("⚠️ Cache vazio. Iniciando Scanner...")
+    if not lista_urls or forcar_atualizacao:
+        # Se mandaram abortar antes de começar
+        if abortar_missao:
+            status_global = "CANCELADO"
+            adicionar_log("🛑 CANCELADO ANTES DE INICIAR.")
+            return
+
+        adicionar_log("⚠️ Iniciando Scanner...")
         loop = asyncio.get_running_loop()
         lista_urls = await loop.run_in_executor(None, scanner_inteligente)
+        
+        # Se abortou no meio do scanner
+        if abortar_missao:
+            status_global = "CANCELADO"
+            return
+
         if lista_urls: salvar_no_cache(lista_urls)
     
     if not lista_urls:
@@ -177,47 +199,56 @@ async def worker_logic(forcar_atualizacao=False, origem="Desconhecido"):
         return
 
     total = len(lista_urls)
-    # Aumentei para 5 robôs para garantir velocidade
-    num_robos = 5
+    num_robos = 50
     adicionar_log(f"🚀 DISPARANDO {num_robos} ROBÔS EM {total} URLS...")
     
     semaphore = asyncio.Semaphore(num_robos) 
     contador = 0
-    start_time = time.time() # Marca hora de inicio para calcular velocidade
+    start_time = time.time()
 
     async with aiohttp.ClientSession() as session:
         async def bound(url):
             nonlocal contador
+            # CHECAGEM DE FREIO A CADA URL
+            if abortar_missao: return
+
             async with semaphore: 
+                if abortar_missao: return
                 await fetch_url(session, url)
                 contador += 1
                 
-                # Log inteligente a cada 200 visitas
                 if contador % 200 == 0: 
                     elapsed = time.time() - start_time
                     if elapsed > 0:
-                        velocidade = contador / elapsed
+                        vel = contador / elapsed
                         restantes = total - contador
-                        segundos_restantes = restantes / velocidade
-                        tempo_formatado = str(datetime.timedelta(seconds=int(segundos_restantes)))
-                        
-                        adicionar_log(f"⚡ {contador}/{total} | Vel: {velocidade:.1f}/s | Falta: {tempo_formatado}")
+                        tempo_formatado = str(datetime.timedelta(seconds=int(restantes / vel)))
+                        adicionar_log(f"⚡ {contador}/{total} | Vel: {vel:.1f}/s | Falta: {tempo_formatado}")
 
         tarefas = [bound(u) for u in lista_urls]
         await asyncio.gather(*tarefas)
     
-    status_global = "CONCLUÍDO"
-    adicionar_log("🏁 CICLO FINALIZADO.")
+    if abortar_missao:
+        status_global = "CANCELADO"
+        adicionar_log("🛑 OPERAÇÃO CANCELADA COM SUCESSO.")
+    else:
+        status_global = "CONCLUÍDO"
+        adicionar_log("🏁 CICLO FINALIZADO.")
 
 def run_background(forcar=False, origem="Desconhecido"):
-    global status_global
+    global status_global, abortar_missao
+    
+    # RESETANDO O FREIO AO INICIAR
+    abortar_missao = False
     status_global = "RODANDO"
+    
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try: loop.run_until_complete(worker_logic(forcar, origem))
     except Exception as e: adicionar_log(f"❌ ERRO: {str(e)}")
     finally:
         loop.close()
+        # Só muda pra parado se não foi cancelado no meio
         if status_global == "RODANDO": status_global = "PARADO"
 
 def agendador_automatico():
@@ -255,6 +286,15 @@ def atualizar():
         t.start()
     return redirect(url_for('monitorar'))
 
+# --- ROTA DE PARAR ---
+@app.route('/parar')
+def parar():
+    global abortar_missao, status_global
+    if status_global == "RODANDO":
+        adicionar_log("⚠️ SOLICITAÇÃO DE PARADA RECEBIDA...")
+        abortar_missao = True
+    return redirect(url_for('monitorar'))
+
 @app.route('/webhook', methods=['GET', 'POST'])
 def webhook():
     if request.args.get('token') != TOKEN_SECRETO: return jsonify({"erro": "Token"}), 403
@@ -275,7 +315,11 @@ def webhook_unitario():
 @app.route('/monitorar')
 def monitorar():
     log_html = ler_logs_do_disco()
-    cor = "green" if status_global == "RODANDO" else "red"
+    
+    cor = "gray"
+    if status_global == "RODANDO": cor = "green"
+    elif status_global == "CANCELADO": cor = "red"
+    
     script_scroll = "<script>window.scrollTo(0, document.body.scrollHeight);</script>"
     
     return f"""
@@ -289,10 +333,13 @@ def monitorar():
         </style>
     </head>
     <body>
-        <h1>Gerador V24 (Com Velocímetro)</h1>
+        <h1>Gerador V25 (Botão Stop)</h1>
         <p>Status: <b style="color:{cor}">{status_global}</b></p>
+        
         <a href="/iniciar" class="btn" style="background:green">INICIAR</a>
         <a href="/atualizar" class="btn" style="background:orange">ATUALIZAR</a>
+        <a href="/parar" class="btn" style="background:red">PARAR TUDO</a>
+        
         <div class="box">
             <div>{log_html}</div>
         </div>
