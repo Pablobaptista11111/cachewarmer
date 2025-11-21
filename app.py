@@ -124,7 +124,7 @@ def scanner_inteligente():
     
     erros = 0
     adicionar_log("🔍 Varrendo produtos...")
-    for i in range(1, 300):
+    for i in range(, 300):
         # VERIFICACAO DE FREIO NO LOOP
         if abortar_missao: 
             adicionar_log("🛑 SCANNER ABORTADO PELO USUÁRIO.")
@@ -133,7 +133,7 @@ def scanner_inteligente():
         if erros >= 3: break
         if i % 20 == 0: adicionar_log(f"Checando sitemap {i}...")
         res = processar_sitemap_individual(f"{BASE_URL}/product-sitemap{i}.xml")
-        if not res: erros += 1
+        if not res: erros += 
         else:
             erros = 0
             add(res)
@@ -199,7 +199,7 @@ async def worker_logic(forcar_atualizacao=False, origem="Desconhecido"):
         return
 
     total = len(lista_urls)
-    num_robos = 5
+    num_robos = 20
     adicionar_log(f"🚀 DISPARANDO {num_robos} ROBÔS EM {total} URLS...")
     
     semaphore = asyncio.Semaphore(num_robos) 
