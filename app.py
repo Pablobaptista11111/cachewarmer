@@ -14,13 +14,15 @@ import datetime
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- CONFIGURAÇÃO V22 (LOG DETETIVE) ---
+# --- CONFIGURAÇÃO V23 (HORÁRIO BRASIL) ---
 BASE_URL = "https://fullbai.com.ar"
 TOKEN_SECRETO = "fullbai123"
 DATA_DIR = "/app/data"
 ARQUIVO_CACHE = os.path.join(DATA_DIR, "lista_urls.json")
 ARQUIVO_LOG = os.path.join(DATA_DIR, "log_visual.txt")
-HORA_AGENDADA = "04:00" 
+
+# O Agendador verifica UTC. 04:00 UTC = 01:00 BRASIL
+HORA_AGENDADA_UTC = "04:00" 
 # ------------------------
 
 app = Flask(__name__)
@@ -33,9 +35,14 @@ HEADERS_FAKE = {
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
 }
 
-# --- SISTEMA DE LOG ---
+# --- NOVO: FUNÇÃO DE HORÁRIO BRASIL ---
+def hora_brasil():
+    # Pega UTC e tira 3 horas
+    agora = datetime.datetime.utcnow() - datetime.timedelta(hours=3)
+    return agora.strftime("%H:%M:%S")
+
 def adicionar_log(msg):
-    timestamp = time.strftime("%H:%M:%S")
+    timestamp = hora_brasil() # Usa a hora corrigida
     linha = f"[{timestamp}] {msg}"
     print(linha, flush=True)
     
@@ -55,7 +62,7 @@ def ler_logs_do_disco():
 def limpar_logs():
     try:
         with open(ARQUIVO_LOG, "w") as f:
-            f.write(f"[{time.strftime('%H:%M:%S')}] --- LOG LIMPO ---\n")
+            f.write(f"[{hora_brasil()}] --- LOG LIMPO ---\n")
     except: pass
 
 # --- INICIALIZAÇÃO ---
@@ -97,7 +104,6 @@ def processar_sitemap_individual(url_sitemap, filtro=None):
                     if filtro in l: produtos.add(l)
                 else:
                     if not ('sitemap' in l and l.endswith('.xml')): produtos.add(l)
-            adicionar_log(f"-> Encontrados {len(produtos)} itens.")
     except Exception as e:
         adicionar_log(f"Erro ao ler {url_sitemap}: {e}")
     return produtos
@@ -116,7 +122,7 @@ def scanner_inteligente():
     add(processar_sitemap_individual(f"{BASE_URL}/page-sitemap.xml"))
     
     erros = 0
-    adicionar_log("🔍 Varrendo produtos (1 ao 300)...")
+    adicionar_log("🔍 Varrendo produtos...")
     for i in range(1, 300):
         if erros >= 3: 
             adicionar_log(f"Parece que acabou no sitemap {i}.")
@@ -128,7 +134,6 @@ def scanner_inteligente():
         else:
             erros = 0
             add(res)
-            
     return urls
 
 async def fetch_url(session, url):
@@ -138,7 +143,6 @@ async def fetch_url(session, url):
             return response.status
     except: return 0
 
-# --- WORKERS ---
 def processador_de_fila():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -146,7 +150,7 @@ def processador_de_fila():
         while True:
             try:
                 url = fila_sniper.get()
-                adicionar_log(f"🎯 SNIPER (Via Webhook): {url}")
+                adicionar_log(f"🎯 SNIPER: {url}")
                 async with aiohttp.ClientSession() as session:
                     await fetch_url(session, url)
                 fila_sniper.task_done()
@@ -161,23 +165,22 @@ async def worker_logic(forcar_atualizacao=False, origem="Desconhecido"):
     global status_global
     lista_urls = []
     
-    # LOG DETETIVE: Mostra quem chamou
     adicionar_log(f"🔔 GATILHO: {origem}")
-    adicionar_log(f"⚙️ Modo Forçar Atualização: {forcar_atualizacao}")
+    adicionar_log(f"⚙️ Forçar Atualização: {forcar_atualizacao}")
     
     if not forcar_atualizacao: 
         lista_urls = carregar_do_cache()
         if lista_urls: adicionar_log(f"📂 Cache carregado: {len(lista_urls)} URLs.")
     
     if not lista_urls:
-        adicionar_log("⚠️ Cache vazio ou inválido. Iniciando Scanner Completo...")
+        adicionar_log("⚠️ Cache vazio. Iniciando Scanner...")
         loop = asyncio.get_running_loop()
         lista_urls = await loop.run_in_executor(None, scanner_inteligente)
         if lista_urls: salvar_no_cache(lista_urls)
     
     if not lista_urls:
         status_global = "PARADO"
-        adicionar_log("❌ Nenhuma URL encontrada para visitar.")
+        adicionar_log("❌ Nenhuma URL encontrada.")
         return
 
     total = len(lista_urls)
@@ -205,20 +208,20 @@ def run_background(forcar=False, origem="Desconhecido"):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try: loop.run_until_complete(worker_logic(forcar, origem))
-    except Exception as e: adicionar_log(f"❌ ERRO FATAL: {str(e)}")
+    except Exception as e: adicionar_log(f"❌ ERRO: {str(e)}")
     finally:
         loop.close()
         if status_global == "RODANDO": status_global = "PARADO"
 
 def agendador_automatico():
-    adicionar_log(f"⏰ Despertador: {HORA_AGENDADA} UTC")
+    adicionar_log(f"⏰ Despertador Configurado: 01:00 (Brasil) / {HORA_AGENDADA_UTC} (UTC)")
     while True:
         try:
-            agora = datetime.datetime.utcnow().strftime("%H:%M")
-            if agora == HORA_AGENDADA:
+            agora_utc = datetime.datetime.utcnow().strftime("%H:%M")
+            if agora_utc == HORA_AGENDADA_UTC:
                 if status_global != "RODANDO":
-                    # Gatilho Automatico
-                    threading.Thread(target=run_background, args=(True, "Agendador Automático (04:00 UTC)")).start()
+                    adicionar_log("⏰ HORA DO SHOW (01:00 BR)! Iniciando...")
+                    threading.Thread(target=run_background, args=(True, "Agendador 01:00 AM")).start()
                     time.sleep(61)
             time.sleep(30)
         except: time.sleep(30)
@@ -226,7 +229,6 @@ def agendador_automatico():
 t_relogio = threading.Thread(target=agendador_automatico, daemon=True)
 t_relogio.start()
 
-# --- ROTAS ---
 @app.route('/')
 def index(): return redirect(url_for('monitorar'))
 
@@ -234,8 +236,7 @@ def index(): return redirect(url_for('monitorar'))
 def iniciar():
     global status_global
     if status_global != "RODANDO":
-        # Gatilho Manual
-        t = threading.Thread(target=run_background, args=(False, "Botão Manual (Site)"))
+        t = threading.Thread(target=run_background, args=(False, "Botão Manual"))
         t.start()
     return redirect(url_for('monitorar'))
 
@@ -244,8 +245,7 @@ def atualizar():
     global status_global
     if status_global != "RODANDO":
         limpar_logs() 
-        # Gatilho Manual
-        t = threading.Thread(target=run_background, args=(True, "Botão Atualizar (Site)"))
+        t = threading.Thread(target=run_background, args=(True, "Botão Atualizar"))
         t.start()
     return redirect(url_for('monitorar'))
 
@@ -255,8 +255,7 @@ def webhook():
     forcar = request.args.get('forcar') == 'sim'
     if status_global != "RODANDO":
         if forcar: limpar_logs()
-        # Gatilho Webhook
-        t = threading.Thread(target=run_background, args=(forcar, "Webhook WordPress/LiteSpeed"))
+        t = threading.Thread(target=run_background, args=(forcar, "Webhook WordPress"))
         t.start()
     return jsonify({"msg": "Rodando"}), 200
 
@@ -284,7 +283,7 @@ def monitorar():
         </style>
     </head>
     <body>
-        <h1>Gerador V22 (Detetive de Logs)</h1>
+        <h1>Gerador V23 (Horário Brasil 🇧🇷)</h1>
         <p>Status: <b style="color:{cor}">{status_global}</b></p>
         <a href="/iniciar" class="btn" style="background:green">INICIAR</a>
         <a href="/atualizar" class="btn" style="background:orange">ATUALIZAR</a>
