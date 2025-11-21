@@ -199,7 +199,7 @@ async def worker_logic(forcar_atualizacao=False, origem="Desconhecido"):
         return
 
     total = len(lista_urls)
-    num_robos = 50
+    num_robos = 5
     adicionar_log(f"🚀 DISPARANDO {num_robos} ROBÔS EM {total} URLS...")
     
     semaphore = asyncio.Semaphore(num_robos) 
