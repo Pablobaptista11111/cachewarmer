@@ -184,9 +184,9 @@ async def worker_logic(forcar_atualizacao=False, origem="Desconhecido"):
         return
 
     total = len(lista_urls)
-    adicionar_log(f"🚀 DISPARANDO 1 ROBÔS EM {total} URLS...")
+    adicionar_log(f"🚀 DISPARANDO 10 ROBÔS EM {total} URLS...")
     
-    semaphore = asyncio.Semaphore(1) 
+    semaphore = asyncio.Semaphore(10) 
     contador = 0
     async with aiohttp.ClientSession() as session:
         async def bound(url):
