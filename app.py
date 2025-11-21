@@ -14,15 +14,13 @@ import datetime
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- CONFIGURAÇÃO V23 (HORÁRIO BRASIL) ---
+# --- CONFIGURAÇÃO V24 (COM VELOCÍMETRO) ---
 BASE_URL = "https://fullbai.com.ar"
 TOKEN_SECRETO = "fullbai123"
 DATA_DIR = "/app/data"
 ARQUIVO_CACHE = os.path.join(DATA_DIR, "lista_urls.json")
 ARQUIVO_LOG = os.path.join(DATA_DIR, "log_visual.txt")
-
-# O Agendador verifica UTC. 04:00 UTC = 01:00 BRASIL
-HORA_AGENDADA_UTC = "04:00" 
+HORA_AGENDADA = "04:00" 
 # ------------------------
 
 app = Flask(__name__)
@@ -35,17 +33,14 @@ HEADERS_FAKE = {
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
 }
 
-# --- NOVO: FUNÇÃO DE HORÁRIO BRASIL ---
 def hora_brasil():
-    # Pega UTC e tira 3 horas
     agora = datetime.datetime.utcnow() - datetime.timedelta(hours=3)
     return agora.strftime("%H:%M:%S")
 
 def adicionar_log(msg):
-    timestamp = hora_brasil() # Usa a hora corrigida
+    timestamp = hora_brasil()
     linha = f"[{timestamp}] {msg}"
     print(linha, flush=True)
-    
     try:
         with open(ARQUIVO_LOG, "a") as f:
             f.write(linha + "\n")
@@ -65,7 +60,6 @@ def limpar_logs():
             f.write(f"[{hora_brasil()}] --- LOG LIMPO ---\n")
     except: pass
 
-# --- INICIALIZAÇÃO ---
 if not os.path.exists(DATA_DIR):
     try: os.makedirs(DATA_DIR)
     except: pass
@@ -166,7 +160,6 @@ async def worker_logic(forcar_atualizacao=False, origem="Desconhecido"):
     lista_urls = []
     
     adicionar_log(f"🔔 GATILHO: {origem}")
-    adicionar_log(f"⚙️ Forçar Atualização: {forcar_atualizacao}")
     
     if not forcar_atualizacao: 
         lista_urls = carregar_do_cache()
@@ -184,18 +177,32 @@ async def worker_logic(forcar_atualizacao=False, origem="Desconhecido"):
         return
 
     total = len(lista_urls)
-    adicionar_log(f"🚀 DISPARANDO 10 ROBÔS EM {total} URLS...")
+    # Aumentei para 50 robôs para garantir velocidade
+    num_robos = 50
+    adicionar_log(f"🚀 DISPARANDO {num_robos} ROBÔS EM {total} URLS...")
     
-    semaphore = asyncio.Semaphore(10) 
+    semaphore = asyncio.Semaphore(num_robos) 
     contador = 0
+    start_time = time.time() # Marca hora de inicio para calcular velocidade
+
     async with aiohttp.ClientSession() as session:
         async def bound(url):
             nonlocal contador
             async with semaphore: 
                 await fetch_url(session, url)
                 contador += 1
-                if contador % 200 == 0: adicionar_log(f"⚡ Progresso: {contador}/{total}...")
-        
+                
+                # Log inteligente a cada 200 visitas
+                if contador % 200 == 0: 
+                    elapsed = time.time() - start_time
+                    if elapsed > 0:
+                        velocidade = contador / elapsed
+                        restantes = total - contador
+                        segundos_restantes = restantes / velocidade
+                        tempo_formatado = str(datetime.timedelta(seconds=int(segundos_restantes)))
+                        
+                        adicionar_log(f"⚡ {contador}/{total} | Vel: {velocidade:.1f}/s | Falta: {tempo_formatado}")
+
         tarefas = [bound(u) for u in lista_urls]
         await asyncio.gather(*tarefas)
     
@@ -214,13 +221,12 @@ def run_background(forcar=False, origem="Desconhecido"):
         if status_global == "RODANDO": status_global = "PARADO"
 
 def agendador_automatico():
-    adicionar_log(f"⏰ Despertador Configurado: 01:00 (Brasil) / {HORA_AGENDADA_UTC} (UTC)")
+    adicionar_log(f"⏰ Despertador: {HORA_AGENDADA} UTC")
     while True:
         try:
             agora_utc = datetime.datetime.utcnow().strftime("%H:%M")
-            if agora_utc == HORA_AGENDADA_UTC:
+            if agora_utc == HORA_AGENDADA:
                 if status_global != "RODANDO":
-                    adicionar_log("⏰ HORA DO SHOW (01:00 BR)! Iniciando...")
                     threading.Thread(target=run_background, args=(True, "Agendador 01:00 AM")).start()
                     time.sleep(61)
             time.sleep(30)
@@ -283,7 +289,7 @@ def monitorar():
         </style>
     </head>
     <body>
-        <h1>Gerador V23 (Horário Brasil 🇧🇷)</h1>
+        <h1>Gerador V24 (Com Velocímetro)</h1>
         <p>Status: <b style="color:{cor}">{status_global}</b></p>
         <a href="/iniciar" class="btn" style="background:green">INICIAR</a>
         <a href="/atualizar" class="btn" style="background:orange">ATUALIZAR</a>
