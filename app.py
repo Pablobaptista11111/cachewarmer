@@ -10,14 +10,19 @@ import json
 import os
 import queue
 import sys
+import datetime
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- CONFIGURAÇÃO V17 (PRIORIDADE PRINCIPALES) ---
+# --- CONFIGURAÇÃO V19 (AUTOMÁTICO) ---
 BASE_URL = "https://fullbai.com.ar"
 TOKEN_SECRETO = "fullbai123"
 DATA_DIR = "/app/data"
 ARQUIVO_CACHE = os.path.join(DATA_DIR, "lista_urls.json")
+
+# HORÁRIO DO AGENDAMENTO (UTC)
+# 04:00 UTC = 01:00 BRASIL
+HORA_AGENDADA = "04:00" 
 # ------------------------
 
 app = Flask(__name__)
@@ -38,7 +43,7 @@ def adicionar_log(msg):
     logs_memoria.insert(0, linha)
     if len(logs_memoria) > 2000: logs_memoria.pop()
 
-# Cria pasta se não existir
+# --- INICIALIZAÇÃO ---
 if not os.path.exists(DATA_DIR):
     try: os.makedirs(DATA_DIR)
     except: pass
@@ -50,103 +55,67 @@ def carregar_do_cache():
     if os.path.exists(ARQUIVO_CACHE):
         try:
             with open(ARQUIVO_CACHE, 'r') as f: return json.load(f)
-        except Exception as e:
-            adicionar_log(f"Erro leitura: {e}")
-            return None
+        except: return None
     return None
 
 def salvar_no_cache(lista_urls):
     try:
         with open(ARQUIVO_CACHE, 'w') as f: json.dump(lista_urls, f)
-        adicionar_log(f"LISTA SALVA: {len(lista_urls)} URLs (Ordem Personalizada).")
+        adicionar_log(f"LISTA SALVA: {len(lista_urls)} URLs.")
     except Exception as e:
         adicionar_log(f"❌ ERRO SALVAR: {e}")
 
 def processar_sitemap_individual(url_sitemap, filtro=None):
-    """Baixa sitemap e opcionalmente filtra URLs por uma palavra"""
-    urls_encontradas = []
+    produtos = set()
     try:
-        # Timeout alto para garantir leitura
-        r = requests.get(url_sitemap, headers=HEADERS_FAKE, timeout=60, verify=False)
+        r = requests.get(url_sitemap, headers=HEADERS_FAKE, timeout=90, verify=False)
         if r.status_code == 200:
             texto = r.content.decode('utf-8', errors='ignore')
             if url_sitemap.endswith('.gz'):
                 try: texto = gzip.decompress(r.content).decode('utf-8')
                 except: pass
-            
             links = get_urls_via_regex(texto)
-            
             for l in links: 
                 l = l.strip()
-                # Se tiver filtro, só adiciona se a URL conter a palavra
                 if filtro:
-                    if filtro in l:
-                        urls_encontradas.append(l)
+                    if filtro in l: produtos.add(l)
                 else:
-                    # Se não for link de sitemap aninhado
-                    if not ('sitemap' in l and l.endswith('.xml')):
-                        urls_encontradas.append(l)
+                    if not ('sitemap' in l and l.endswith('.xml')): produtos.add(l)
     except: pass
-    return urls_encontradas
+    return produtos
 
-def scanner_personalizado():
-    """Lógica de Prioridade V17"""
-    lista_final = []
+def scanner_inteligente():
+    urls = []
     visitados = set()
-
-    def adicionar_na_lista(novas_urls):
-        count = 0
-        for u in novas_urls:
+    def add(novas):
+        for u in novas:
             if u not in visitados:
                 visitados.add(u)
-                lista_final.append(u)
-                count += 1
-        return count
+                urls.append(u)
 
-    # --- FASE 1: CATEGORIAS "PRINCIPALES" ---
-    adicionar_log("1. Buscando 'Principales' no sitemap de categorias...")
-    cats = processar_sitemap_individual(f"{BASE_URL}/product_cat-sitemap.xml", filtro="principales")
-    qtd = adicionar_na_lista(cats)
-    adicionar_log(f"-> Encontradas {qtd} categorias/subcategorias Principales.")
-
-    # --- FASE 2: PÁGINAS (Institucionais) ---
-    adicionar_log("2. Buscando Páginas...")
-    pags = processar_sitemap_individual(f"{BASE_URL}/page-sitemap.xml")
-    qtd = adicionar_na_lista(pags)
-    adicionar_log(f"-> Encontradas {qtd} páginas.")
-
-    # --- FASE 3: PRODUTOS (Todos) ---
-    adicionar_log("3. Buscando Produtos (Do 1 ao 300)...")
+    adicionar_log("AUTO: Buscando 'Principales'...")
+    add(processar_sitemap_individual(f"{BASE_URL}/product_cat-sitemap.xml", filtro="principales"))
+    adicionar_log("AUTO: Buscando Páginas...")
+    add(processar_sitemap_individual(f"{BASE_URL}/page-sitemap.xml"))
+    
+    adicionar_log("AUTO: Buscando Produtos...")
     erros = 0
-    total_produtos = 0
     for i in range(1, 300):
-        if erros >= 3: 
-            adicionar_log(f"Fim dos sitemaps de produtos (Sitemap {i}).")
-            break
-        
-        url = f"{BASE_URL}/product-sitemap{i}.xml"
-        prods = processar_sitemap_individual(url)
-        
-        if not prods: 
-            erros += 1
+        if erros >= 3: break
+        res = processar_sitemap_individual(f"{BASE_URL}/product-sitemap{i}.xml")
+        if not res: erros += 1
         else:
             erros = 0
-            qtd = adicionar_na_lista(prods)
-            total_produtos += qtd
-            # Aviso a cada 10 sitemaps lidos para não poluir
-            if i % 10 == 0:
-                adicionar_log(f"Lendo sitemap {i}... (Total produtos: {total_produtos})")
-
-    return lista_final
+            add(res)
+    return urls
 
 async def fetch_url(session, url):
     try:
         async with session.get(url, headers=HEADERS_FAKE, timeout=30, ssl=False) as response:
             await response.read()
-            return response.status
-    except: return 0
+    except: pass
 
-# --- WORKER FILA ---
+# --- WORKERS ---
 def processador_de_fila():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -165,42 +134,35 @@ def processador_de_fila():
 t_fila = threading.Thread(target=processador_de_fila, daemon=True)
 t_fila.start()
 
-# --- WORKER GERAL ---
 async def worker_logic(forcar_atualizacao=False):
     global status_global
     lista_urls = []
     
     if not forcar_atualizacao: lista_urls = carregar_do_cache()
     if not lista_urls:
-        adicionar_log("Criando lista personalizada...")
+        adicionar_log("AUTO: Gerando lista...")
         loop = asyncio.get_running_loop()
-        lista_urls = await loop.run_in_executor(None, scanner_personalizado)
+        lista_urls = await loop.run_in_executor(None, scanner_inteligente)
         if lista_urls: salvar_no_cache(lista_urls)
     
     if not lista_urls:
         status_global = "PARADO"
-        adicionar_log("Nenhuma URL encontrada.")
         return
 
     total = len(lista_urls)
-    adicionar_log(f"--- INICIANDO VISITA: {total} URLS (Ordem Prioritária) ---")
-    
-    semaphore = asyncio.Semaphore(50)
+    semaphore = asyncio.Semaphore(50) 
     contador = 0
-    
     async with aiohttp.ClientSession() as session:
-        async def visitador(url):
+        async def bound(url):
             nonlocal contador
-            async with semaphore:
+            async with semaphore: 
                 await fetch_url(session, url)
                 contador += 1
-                if contador % 200 == 0:
-                    adicionar_log(f"🚀 Progresso: {contador}/{total}...")
-
-        tarefas = [visitador(url) for url in lista_urls]
+                if contador % 200 == 0: adicionar_log(f"🚀 Progresso: {contador}/{total}...")
+        
+        tarefas = [bound(u) for u in lista_urls]
         await asyncio.gather(*tarefas)
     
-    adicionar_log("--- CICLO COMPLETO FINALIZADO ---")
     status_global = "CONCLUÍDO"
 
 def run_background(forcar=False):
@@ -213,6 +175,29 @@ def run_background(forcar=False):
     finally:
         loop.close()
         if status_global == "RODANDO": status_global = "PARADO"
+
+# --- O DESPERTADOR AUTOMÁTICO (NOVO) ---
+def agendador_automatico():
+    """Verifica a hora a cada 30 segundos"""
+    adicionar_log(f"⏰ Despertador ativado para {HORA_AGENDADA} UTC (01:00 Brasil)")
+    while True:
+        try:
+            agora_utc = datetime.datetime.utcnow().strftime("%H:%M")
+            if agora_utc == HORA_AGENDADA:
+                if status_global != "RODANDO":
+                    adicionar_log("⏰ HORA DO SHOW! Iniciando rotina automática...")
+                    # Inicia em modo FORÇAR (True) para recriar a lista do dia
+                    threading.Thread(target=run_background, args=(True,)).start()
+                    # Dorme 61 segundos para não disparar duas vezes no mesmo minuto
+                    time.sleep(61)
+            time.sleep(30)
+        except Exception as e:
+            print(f"Erro no relogio: {e}")
+            time.sleep(30)
+
+# Inicia o relógio
+t_relogio = threading.Thread(target=agendador_automatico, daemon=True)
+t_relogio.start()
 
 # --- ROTAS ---
 @app.route('/')
@@ -237,8 +222,9 @@ def atualizar():
 @app.route('/webhook', methods=['GET', 'POST'])
 def webhook():
     if request.args.get('token') != TOKEN_SECRETO: return jsonify({"erro": "Token"}), 403
+    forcar = request.args.get('forcar') == 'sim'
     if status_global != "RODANDO":
-        t = threading.Thread(target=run_background, args=(False,))
+        t = threading.Thread(target=run_background, args=(forcar,))
         t.start()
     return jsonify({"msg": "Rodando"}), 200
 
@@ -264,10 +250,10 @@ def monitorar():
         </style>
     </head>
     <body>
-        <h1>Gerador V17 (Prioridade: Principales)</h1>
+        <h1>Gerador V19 (Automático)</h1>
         <p>Status: <b style="color:{cor}">{status_global}</b></p>
-        <a href="/iniciar" class="btn" style="background:green">INICIAR (CACHE)</a>
-        <a href="/atualizar" class="btn" style="background:orange">CRIAR LISTA (NOVA ORDEM)</a>
+        <a href="/iniciar" class="btn" style="background:green">INICIAR AGORA</a>
+        <a href="/atualizar" class="btn" style="background:orange">ATUALIZAR LISTA</a>
         <div class="box"><div>{log_html}</div></div>
     </body>
     </html>
