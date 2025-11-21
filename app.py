@@ -14,21 +14,18 @@ import datetime
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- CONFIGURAÇÃO V19 (AUTOMÁTICO) ---
+# --- CONFIGURAÇÃO V20 (LOG EM ARQUIVO) ---
 BASE_URL = "https://fullbai.com.ar"
 TOKEN_SECRETO = "fullbai123"
 DATA_DIR = "/app/data"
 ARQUIVO_CACHE = os.path.join(DATA_DIR, "lista_urls.json")
-
-# HORÁRIO DO AGENDAMENTO (UTC)
-# 04:00 UTC = 01:00 BRASIL
+ARQUIVO_LOG = os.path.join(DATA_DIR, "log_visual.txt") # Log agora fica no disco
 HORA_AGENDADA = "04:00" 
 # ------------------------
 
 app = Flask(__name__)
 
 status_global = "PARADO"
-logs_memoria = []
 fila_sniper = queue.Queue()
 
 HEADERS_FAKE = {
@@ -36,12 +33,36 @@ HEADERS_FAKE = {
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
 }
 
+# --- SISTEMA DE LOG NOVO (GRAVA NO DISCO) ---
 def adicionar_log(msg):
     timestamp = time.strftime("%H:%M:%S")
     linha = f"[{timestamp}] {msg}"
-    print(linha, flush=True)
-    logs_memoria.insert(0, linha)
-    if len(logs_memoria) > 2000: logs_memoria.pop()
+    print(linha, flush=True) # Escreve na tela preta
+    
+    try:
+        # Escreve no arquivo de texto (append)
+        with open(ARQUIVO_LOG, "a") as f:
+            f.write(linha + "\n")
+    except:
+        pass
+
+def ler_logs_do_disco():
+    """Lê as ultimas 100 linhas do arquivo de log"""
+    if not os.path.exists(ARQUIVO_LOG):
+        return "Aguardando logs..."
+    try:
+        with open(ARQUIVO_LOG, "r") as f:
+            linhas = f.readlines()
+            # Pega as ultimas 200 e inverte (mais recente no topo)
+            return "<br>".join(reversed(linhas[-200:]))
+    except:
+        return "Erro ao ler logs."
+
+def limpar_logs():
+    try:
+        with open(ARQUIVO_LOG, "w") as f:
+            f.write(f"[{time.strftime('%H:%M:%S')}] --- LOG LIMPO ---\n")
+    except: pass
 
 # --- INICIALIZAÇÃO ---
 if not os.path.exists(DATA_DIR):
@@ -61,13 +82,14 @@ def carregar_do_cache():
 def salvar_no_cache(lista_urls):
     try:
         with open(ARQUIVO_CACHE, 'w') as f: json.dump(lista_urls, f)
-        adicionar_log(f"LISTA SALVA: {len(lista_urls)} URLs.")
+        adicionar_log(f"💾 LISTA SALVA: {len(lista_urls)} URLs no disco.")
     except Exception as e:
         adicionar_log(f"❌ ERRO SALVAR: {e}")
 
 def processar_sitemap_individual(url_sitemap, filtro=None):
     produtos = set()
     try:
+        adicionar_log(f"Lendo sitemap: {url_sitemap}...")
         r = requests.get(url_sitemap, headers=HEADERS_FAKE, timeout=90, verify=False)
         if r.status_code == 200:
             texto = r.content.decode('utf-8', errors='ignore')
@@ -81,39 +103,56 @@ def processar_sitemap_individual(url_sitemap, filtro=None):
                     if filtro in l: produtos.add(l)
                 else:
                     if not ('sitemap' in l and l.endswith('.xml')): produtos.add(l)
-    except: pass
+            adicionar_log(f"-> Encontrados {len(produtos)} itens.")
+    except Exception as e:
+        adicionar_log(f"Erro ao ler {url_sitemap}: {e}")
     return produtos
 
 def scanner_inteligente():
     urls = []
     visitados = set()
     def add(novas):
+        count = 0
         for u in novas:
             if u not in visitados:
                 visitados.add(u)
                 urls.append(u)
+                count += 1
+        return count
 
-    adicionar_log("AUTO: Buscando 'Principales'...")
-    add(processar_sitemap_individual(f"{BASE_URL}/product_cat-sitemap.xml", filtro="principales"))
-    adicionar_log("AUTO: Buscando Páginas...")
-    add(processar_sitemap_individual(f"{BASE_URL}/page-sitemap.xml"))
+    adicionar_log("🔍 INICIANDO SCANNER...")
     
-    adicionar_log("AUTO: Buscando Produtos...")
+    # Principales
+    qtd = add(processar_sitemap_individual(f"{BASE_URL}/product_cat-sitemap.xml", filtro="principales"))
+    
+    # Paginas
+    qtd += add(processar_sitemap_individual(f"{BASE_URL}/page-sitemap.xml"))
+    
+    # Produtos
     erros = 0
+    adicionar_log("🔍 Varrendo produtos (1 ao 300)...")
     for i in range(1, 300):
-        if erros >= 3: break
+        if erros >= 3: 
+            adicionar_log(f"Parece que acabou no sitemap {i}.")
+            break
+        
+        # Log a cada 10 para saber que está vivo
+        if i % 10 == 0: adicionar_log(f"Checando sitemap {i}...")
+            
         res = processar_sitemap_individual(f"{BASE_URL}/product-sitemap{i}.xml")
         if not res: erros += 1
         else:
             erros = 0
             add(res)
+            
     return urls
 
 async def fetch_url(session, url):
     try:
         async with session.get(url, headers=HEADERS_FAKE, timeout=30, ssl=False) as response:
             await response.read()
-    except: pass
+            return response.status
+    except: return 0
 
 # --- WORKERS ---
 def processador_de_fila():
@@ -138,18 +177,26 @@ async def worker_logic(forcar_atualizacao=False):
     global status_global
     lista_urls = []
     
-    if not forcar_atualizacao: lista_urls = carregar_do_cache()
+    adicionar_log(f"⚙️ Worker Iniciado. Modo Forçar: {forcar_atualizacao}")
+    
+    if not forcar_atualizacao: 
+        lista_urls = carregar_do_cache()
+        if lista_urls: adicionar_log(f"📂 Cache carregado: {len(lista_urls)} URLs.")
+    
     if not lista_urls:
-        adicionar_log("AUTO: Gerando lista...")
+        adicionar_log("⚠️ Cache vazio ou inválido. Iniciando Scanner Completo...")
         loop = asyncio.get_running_loop()
         lista_urls = await loop.run_in_executor(None, scanner_inteligente)
         if lista_urls: salvar_no_cache(lista_urls)
     
     if not lista_urls:
         status_global = "PARADO"
+        adicionar_log("❌ Nenhuma URL encontrada para visitar.")
         return
 
     total = len(lista_urls)
+    adicionar_log(f"🚀 DISPARANDO 50 ROBÔS PARA {total} URLS...")
+    
     semaphore = asyncio.Semaphore(50) 
     contador = 0
     async with aiohttp.ClientSession() as session:
@@ -158,44 +205,39 @@ async def worker_logic(forcar_atualizacao=False):
             async with semaphore: 
                 await fetch_url(session, url)
                 contador += 1
-                if contador % 200 == 0: adicionar_log(f"🚀 Progresso: {contador}/{total}...")
+                if contador % 200 == 0: adicionar_log(f"⚡ Progresso: {contador}/{total}...")
         
         tarefas = [bound(u) for u in lista_urls]
         await asyncio.gather(*tarefas)
     
     status_global = "CONCLUÍDO"
+    adicionar_log("🏁 CICLO FINALIZADO COM SUCESSO.")
 
 def run_background(forcar=False):
     global status_global
     status_global = "RODANDO"
-    logs_memoria.clear()
+    # NÃO LIMPA MAIS O LOG AQUI
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try: loop.run_until_complete(worker_logic(forcar))
+    except Exception as e: adicionar_log(f"❌ ERRO FATAL: {str(e)}")
     finally:
         loop.close()
         if status_global == "RODANDO": status_global = "PARADO"
 
-# --- O DESPERTADOR AUTOMÁTICO (NOVO) ---
 def agendador_automatico():
-    """Verifica a hora a cada 30 segundos"""
-    adicionar_log(f"⏰ Despertador ativado para {HORA_AGENDADA} UTC (01:00 Brasil)")
+    adicionar_log(f"⏰ Despertador ativado para {HORA_AGENDADA} UTC")
     while True:
         try:
-            agora_utc = datetime.datetime.utcnow().strftime("%H:%M")
-            if agora_utc == HORA_AGENDADA:
+            agora = datetime.datetime.utcnow().strftime("%H:%M")
+            if agora == HORA_AGENDADA:
                 if status_global != "RODANDO":
-                    adicionar_log("⏰ HORA DO SHOW! Iniciando rotina automática...")
-                    # Inicia em modo FORÇAR (True) para recriar a lista do dia
+                    adicionar_log("⏰ HORÁRIO AGENDADO: Iniciando atualização total...")
                     threading.Thread(target=run_background, args=(True,)).start()
-                    # Dorme 61 segundos para não disparar duas vezes no mesmo minuto
                     time.sleep(61)
             time.sleep(30)
-        except Exception as e:
-            print(f"Erro no relogio: {e}")
-            time.sleep(30)
+        except: time.sleep(30)
 
-# Inicia o relógio
 t_relogio = threading.Thread(target=agendador_automatico, daemon=True)
 t_relogio.start()
 
@@ -215,6 +257,8 @@ def iniciar():
 def atualizar():
     global status_global
     if status_global != "RODANDO":
+        # Limpa log apenas ao forçar atualização nova
+        limpar_logs() 
         t = threading.Thread(target=run_background, args=(True,))
         t.start()
     return redirect(url_for('monitorar'))
@@ -224,6 +268,7 @@ def webhook():
     if request.args.get('token') != TOKEN_SECRETO: return jsonify({"erro": "Token"}), 403
     forcar = request.args.get('forcar') == 'sim'
     if status_global != "RODANDO":
+        if forcar: limpar_logs()
         t = threading.Thread(target=run_background, args=(forcar,))
         t.start()
     return jsonify({"msg": "Rodando"}), 200
@@ -237,7 +282,8 @@ def webhook_unitario():
 
 @app.route('/monitorar')
 def monitorar():
-    log_html = "<br>".join(logs_memoria)
+    # LÊ DO ARQUIVO FÍSICO
+    log_html = ler_logs_do_disco()
     cor = "green" if status_global == "RODANDO" else "red"
     return f"""
     <html>
@@ -250,11 +296,13 @@ def monitorar():
         </style>
     </head>
     <body>
-        <h1>Gerador V19 (Automático)</h1>
+        <h1>Gerador V20 (Log em Arquivo)</h1>
         <p>Status: <b style="color:{cor}">{status_global}</b></p>
-        <a href="/iniciar" class="btn" style="background:green">INICIAR AGORA</a>
-        <a href="/atualizar" class="btn" style="background:orange">ATUALIZAR LISTA</a>
-        <div class="box"><div>{log_html}</div></div>
+        <a href="/iniciar" class="btn" style="background:green">INICIAR (RÁPIDO)</a>
+        <a href="/atualizar" class="btn" style="background:orange">ATUALIZAR TUDO (LENTO)</a>
+        <div class="box">
+            <div>{log_html}</div>
+        </div>
     </body>
     </html>
     """
