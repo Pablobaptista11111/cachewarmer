@@ -124,7 +124,7 @@ def scanner_inteligente():
     
     erros = 0
     adicionar_log("🔍 Varrendo produtos...")
-    for i in range(, 300):
+    for i in range(1, 300):
         # VERIFICACAO DE FREIO NO LOOP
         if abortar_missao: 
             adicionar_log("🛑 SCANNER ABORTADO PELO USUÁRIO.")
@@ -133,7 +133,7 @@ def scanner_inteligente():
         if erros >= 3: break
         if i % 20 == 0: adicionar_log(f"Checando sitemap {i}...")
         res = processar_sitemap_individual(f"{BASE_URL}/product-sitemap{i}.xml")
-        if not res: erros += 
+        if not res: erros += 1
         else:
             erros = 0
             add(res)
