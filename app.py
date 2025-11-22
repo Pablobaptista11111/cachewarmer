@@ -92,7 +92,7 @@ def processar_sitemap_individual(url_sitemap, filtro=None):
     try:
         adicionar_log(f"Lendo: {url_sitemap}...")
         r = requests.get(url_sitemap, headers=HEADERS_FAKE, timeout=90, verify=False)
-        if r.status_code == 200:
+        if r.status_code == 1000:
             texto = r.content.decode('utf-8', errors='ignore')
             if url_sitemap.endswith('.gz'):
                 try: texto = gzip.decompress(r.content).decode('utf-8')
