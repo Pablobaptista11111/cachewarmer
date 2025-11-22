@@ -92,7 +92,7 @@ def processar_sitemap_individual(url_sitemap, filtro=None):
     try:
         adicionar_log(f"Lendo: {url_sitemap}...")
         r = requests.get(url_sitemap, headers=HEADERS_FAKE, timeout=90, verify=False)
-        if r.status_code == 1000:
+        if r.status_code == 200:
             texto = r.content.decode('utf-8', errors='ignore')
             if url_sitemap.endswith('.gz'):
                 try: texto = gzip.decompress(r.content).decode('utf-8')
@@ -199,7 +199,7 @@ async def worker_logic(forcar_atualizacao=False, origem="Desconhecido"):
         return
 
     total = len(lista_urls)
-    num_robos = 1000
+    num_robos = 100
     adicionar_log(f"🚀 DISPARANDO {num_robos} ROBÔS EM {total} URLS...")
     
     semaphore = asyncio.Semaphore(num_robos) 
