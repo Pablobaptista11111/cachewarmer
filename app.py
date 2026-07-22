@@ -37,14 +37,23 @@ HEADERS_FAKE = {
 }
 
 def hora_brasil():
-    agora = datetime.datetime.utcnow() - datetime.timedelta(hours=3)
+    agora = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=3)
     return agora.strftime("%H:%M:%S")
+
+LOG_MAX_BYTES = 5 * 1024 * 1024  # Limita o log a ~5MB para nao estourar disco/memoria
 
 def adicionar_log(msg):
     timestamp = hora_brasil()
     linha = f"[{timestamp}] {msg}"
     print(linha, flush=True)
     try:
+        # Rotaciona o log quando fica grande (mantem apenas o final)
+        if os.path.exists(ARQUIVO_LOG) and os.path.getsize(ARQUIVO_LOG) > LOG_MAX_BYTES:
+            with open(ARQUIVO_LOG, "rb") as f:
+                f.seek(-1 * 1024 * 1024, os.SEEK_END)
+                cauda = f.read()
+            with open(ARQUIVO_LOG, "wb") as f:
+                f.write(cauda)
         with open(ARQUIVO_LOG, "a") as f:
             f.write(linha + "\n")
     except: pass
@@ -52,9 +61,14 @@ def adicionar_log(msg):
 def ler_logs_do_disco():
     if not os.path.exists(ARQUIVO_LOG): return "Aguardando logs..."
     try:
-        with open(ARQUIVO_LOG, "r") as f:
-            linhas = f.readlines()[-300:] 
-            return "<br>".join(linhas)
+        # Le apenas o final do arquivo (evita carregar logs gigantes na memoria)
+        with open(ARQUIVO_LOG, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            tamanho = f.tell()
+            f.seek(max(0, tamanho - 65536))
+            dados = f.read().decode("utf-8", errors="ignore")
+        linhas = dados.splitlines()[-300:]
+        return "<br>".join(linhas)
     except: return "Erro logs"
 
 def limpar_logs():
@@ -255,7 +269,7 @@ def agendador_automatico():
     adicionar_log(f"⏰ Despertador: {HORA_AGENDADA} UTC")
     while True:
         try:
-            agora_utc = datetime.datetime.utcnow().strftime("%H:%M")
+            agora_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M")
             if agora_utc == HORA_AGENDADA:
                 if status_global != "RODANDO":
                     threading.Thread(target=run_background, args=(True, "Agendador 01:00 AM")).start()
@@ -349,4 +363,7 @@ def monitorar():
     """
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=80)
+    porta = int(os.environ.get("PORT", 80))
+    # threaded=True e ESSENCIAL: sem isso o servidor do Flask atende 1 conexao
+    # por vez e trava atras do proxy do EasyPanel (conexoes keep-alive).
+    app.run(host='0.0.0.0', port=porta, threaded=True)
