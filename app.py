@@ -363,7 +363,10 @@ def monitorar():
     """
 
 if __name__ == '__main__':
-    porta = int(os.environ.get("PORT", 80))
+    # Porta 80 fixa: e a porta interna para onde o Traefik do EasyPanel roteia
+    # este container. NAO ler PORT do ambiente (o EasyPanel/Nixpacks pode injetar
+    # um PORT diferente, o que faria o app escutar na porta errada e ficar
+    # inacessivel).
     # threaded=True e ESSENCIAL: sem isso o servidor do Flask atende 1 conexao
     # por vez e trava atras do proxy do EasyPanel (conexoes keep-alive).
-    app.run(host='0.0.0.0', port=porta, threaded=True)
+    app.run(host='0.0.0.0', port=80, threaded=True)
