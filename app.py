@@ -15,10 +15,9 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- CONFIGURAÇÃO V25 (COM FREIO DE EMERGÊNCIA) ---
-# Configurável por variável de ambiente (app genérico, sem site fixo no código).
-BASE_URL = os.environ.get("BASE_URL", "https://uvmix.wpatomic.com.br").rstrip("/")
-TOKEN_SECRETO = os.environ.get("CACHE_TOKEN", "uvmix123")
-DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
+BASE_URL = "https://fullbai.com.ar"
+TOKEN_SECRETO = "fullbai123"
+DATA_DIR = "/app/data"
 ARQUIVO_CACHE = os.path.join(DATA_DIR, "lista_urls.json")
 ARQUIVO_LOG = os.path.join(DATA_DIR, "log_visual.txt")
 HORA_AGENDADA = "04:00" 
